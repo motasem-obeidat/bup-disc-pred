@@ -1,0 +1,298 @@
+
+## Data Filtering
+
+Loaded cohort with 14,060 patients
+
+================================================================================
+
+[STEP 1] Applying base timeframe (2018-01-01 - 2022-12-31) + age >= 18...
+   - Initial Cohort: 14,060
+
+   - Excluded due to Date Range: 0
+   - Excluded due to Age < 18: 17
+
+→ Remaining: 14,043
+
+================================================================================
+
+[STEP 2] Checking Follow-up Feasibility (BUP Start Date <= 2021-12-31) to allow ≥ 12-month follow-up...
+   - Excluded (Insufficient follow-up time): 2,594
+
+→ Remaining: 11,449
+
+================================================================================
+
+[STEP 3] Identifying most recent OUD diagnosis relative to BUP Start.
+   - Window: SVCDATE ≤ BUP_START + 3 days (post-start diagnoses treated as 0-day offset)
+   - Definition: ICD-9 (304.0x, 305.5x) or ICD-10 (F11.xx)
+   - Classification: Using DIAG_NUM to flag Primary (Pos 1) vs. Secondary (Pos >1) diagnosis
+
+   - Patients with identified OUD Diagnosis: 10,059 (87.9%)
+   - Patients without recent OUD Dx (historical & handled in SQL): 1,390
+   - Diagnosis Position: 8,128 had Primary, 5,688 had Secondary
+   - Avg Days from OUD Dx to BUP Start: 59.6 days
+
+→ Remaining (No filter applied): 11,449
+
+================================================================================
+
+[STEP 4] Extracting BUP prescriptions during follow-up (365 days).
+   - Window: BUP_START_DATE to BUP_START_DATE + 365 days
+   - Criteria: TCGPI_ID starts with '6520001' AND TCGPI_NAME contains 'buprenorphine'
+
+→ Extracted 115,305 valid BUP fills in follow-up window.
+
+================================================================================
+
+[STEP 4] Filtering for OUD-indicated formulations only (Excluding Pain products).
+   - Logic: Retain only Buccal (Bunavail), Subcutaneous (Sublocade/Brixadi), and Sublingual (Suboxone/Zubsolv/Subutex/Buprenorphine)
+   - Source: Using Rx columns 'ROA_DESCR' (as Route of Administration) and 'DRUG_NAME' (as Product)
+   - Window: BUP_START_DATE to BUP_START_DATE + 365 days
+
+   - Patients Excluded (Prescribed non-OUD formulations): 1,808
+
+   --- Included Formulations Analysis (Grouped by Route & Drug) ---
+   - Route: Sublingual      | Drug: Buprenorphine HCl-Naloxone HCl (n=68,188 fills)
+   - Route: Sublingual      | Drug: Suboxone                       (n=18,547 fills)
+   - Route: Sublingual      | Drug: Buprenorphine HCl              (n=11,783 fills)
+   - Route: Sublingual      | Drug: Zubsolv                        (n=4,617 fills)
+   - Route: Subcutaneous    | Drug: Sublocade                      (n=781 fills)
+   - Route: Buccal          | Drug: Bunavail                       (n=147 fills)
+
+→ Remaining: 9,641
+
+================================================================================
+
+[STEP 5] Validating Treatment Persistence (Minimum 2 distinct fills).
+   - Logic: Excl. 'one-and-done' initiations; requires ≥2 fills on different dates
+   - Purpose: Ensuring cohort captures engaged patients vs. failed inductions
+   - Window: BUP_START_DATE to BUP_START_DATE + 365 days
+
+   - Initial Cohort: 9,641
+   - Excluded (0 fills found): 0 (No Rx records found in follow-up window)
+   - Excluded (1 fill only): 1,376 (Early discontinuation / 'One-and-Done')
+   
+→ Remaining (Retained ≥2 distinct fills): 8,265
+
+================================================================================
+
+[STEP 6] Continuous Enrollment Check...
+   [NOTE] Logic Skipped (Pre-calculated in SQL). Required Definition: 180 days pre-index through 365 days post-index.
+→ Remaining: 8,265
+
+================================================================================
+
+[STEP 7] Excluding patients with Medicare Advantage encounters.
+   - Logic: Identify patients with any encounter where IS_MEDICARE = 1
+   - Window: BUP_START_DATE to BUP_START_DATE + 365 days
+
+   - Patients identified with Medicare Advantage: 160
+   - Excluded: 160
+
+→ Remaining: 8,105
+
+================================================================================
+
+[STEP 8] Data Quality Check: Dropping patients with invalid DAYSUPP (≤ 0).
+   - Patients with invalid Rx records (Days Supply <= 0): 9
+   - Excluded: 9
+
+→ Remaining: 8,096
+
+================================================================================
+
+[STEP 9] Classifying Initial Daily Dose (Index Date).
+   - Logic: SUM of daily dose contributions of all fills occurring exactly on BUP_START_DATE.
+   - Formula: (Strength * Quantity) / Days Supply
+   - Dose Bins: 0=Low(≤8), 1=Std(8-16), 2=High(16-24), 3=Very High(>24), 4=injectable, -1=Unknown
+   - Grouping Definitions:
+     * Groups 0-3 (Non-injectable): ['sublingual', 'buccal', 'film', 'tablet', 'transmucosal']
+     * Group 4 (Injectable): ['subcutaneous', 'intramuscular', 'injection', 'liquid']
+     * Unknown (-1): Any descriptions not matching above
+
+   - Total Patients Classified: 8,096
+
+   - Distribution of Initial Doses:
+     * Low (<= 8 mg)          : 3,564 (44.0%)
+     * Standard (> 8-16 mg)   : 3,555 (43.9%)
+     * High (> 16-24 mg)      : 862 (10.6%)
+     * Very High (> 24 mg)    : 87 (1.1%)
+     * Injectable             : 28 (0.3%)
+
+   - Non-injectable Dose Stats: Mean=13.9mg, Median=12.0mg
+
+→ Remaining: 8,096
+
+================================================================================
+
+[INFO] Adding 'INITIAL_DAYSUPP' (Days Supply on BUP Start Date).
+   - Logic: Filter to fills occurring exactly on BUP_START_DATE.
+   - Aggregation: SUM of DAYSUPP if multiple fills exist on this date.
+
+================================================================================
+
+[STEP 10] Identifying MOUD Switchers (Switch to Methadone or Naltrexone).
+   - Window: BUP_START_DATE to BUP_START_DATE + 365 days
+   - Criteria: 
+       1. Rx: Must match TCGPI_NAME contains 'naltrexone')
+          AND fall into one of these specific Formulation categories:
+          a. Route='intramuscular' & Name='VIVITROL'
+          b. Route='oral' & Name in {'EMBEDA', 'NALTREXONE HCL'})
+          c. TCGPI_NAME='naltrexone hcl (bulk) powder' & Name in {'NALTREXONE HCL', 'NALTREXONE'})
+       2. Procedure: Methadone/Naltrexone (Codes: H0020, G2067, G2078, S0109, J2315)
+
+   - Total Switchers Identified: 585
+     * Via Rx: 463
+     * Via Procedure: 181
+
+   - Breakdown of Naltrexone Rx Formulations Found:
+     * Intramuscular   | Vivitrol             : 481 fills
+     * Oral            | Naltrexone HCl       : 640 fills
+
+→ Remaining: 8,096
+
+================================================================================
+
+[STEP 11] Classifying Patient-Level Treatment Status (Continued vs Discontinued).
+   - Gap Threshold: ≥ 30 days between supply end and next fill implies discontinuation.
+   - Hierarchy: If 'Switcher' flag is set → 'Discontinued – Switch'; otherwise check gaps.
+   - Note: Same-day fills are aggregated (DAYSUPP summed).
+
+   - Status Distribution:
+     * Continued                 : 4,968 (61.4%)
+     * Discontinued – Gap        : 2,543 (31.4%)
+     * Discontinued – Switch     : 585 (7.2%)
+
+   - Discontinuation by Initial Dose Group:
+      BUP_STATUS          Continued  Discontinued – Gap  Discontinued – Switch
+      INITIAL_DOSE_GROUP                                                      
+      Low                      2086                1154                    324
+      Std                      2283                1069                    203
+      High                      528                 286                     48
+      V.High                     56                  22                      9
+      Inj/Imp                    15                  12                      1
+
+→ Remaining: 8,096
+
+================================================================================
+
+[STEP 12] Calculating Proportion of Days Covered (PDC).
+   - Window: First 30 days starting on the index date (index day included).
+   - Definition: (Unique days with drug supply / 30).
+   - Threshold for High Adherence: ≥ 80% (PDC ≥ 0.8).
+   - Note: Same-day fills are aggregated (DAYSUPP summed).
+\
+   - PDC Stats (Mean/Median): 0.86 / 1.0
+   
+   - Adherence Categories (Threshold 80%):
+     * Low Adherence (<80%)  : 1,816 (22.4%)
+     * High Adherence (≥80%) : 6,280 (77.6%)
+
+================================================================================
+================================================================================
+================================================================================
+
+## Features Extraction
+
+Loaded cohort rows: 8,096
+
+================================================================================
+
+[STEP 1] Merging Demographics.
+   - Eligibility Check: Must span [180 days pre-BUP, 360 days post-BUP].
+   - Logic: Retaining longest qualifying span per patient.
+   - Classification: MSA=0 -> Rural, MSA>0 -> Urban, MSA=NaN -> Missing.
+
+   - No patients have multiple qualifying spans — one span per patient.
+
+   → 8,096 unique patients retained after deduplication of eligibility spans.
+      --- Demographic Breakdown ---
+      * Rural          : 2,217 (27.4%)
+      * Urban          : 5,879 (72.6%)
+      --- Age Groups ---
+      * 18-24          : 1,719 (21.2%)
+      * 25-34          : 1,586 (19.6%)
+      * 35-44          : 2,110 (26.1%)
+      * 45-54          : 1,557 (19.2%)
+      * 55+            : 1,124 (13.9%)
+      --- Sex  ---
+      * Male      : 5,018 (62.0%)
+      * Female    : 3,078 (38.0%)
+
+→ Demographics Merged. Total Cohort: 8,096
+
+================================================================================
+
+[STEP 2] Diagnosis Flagging.
+   - Window: 180 days prior to BUP Start.
+   - Logic: Binary flag if ICD code starts with defined prefixes.
+   - Categories Checked: 14 disease groups.
+
+   --- Comorbidity Prevalence (Pre-Index) ---
+    * OUD_MODSEV                : 3,944 (48.7%)
+    * CHRONIC_PAIN              : 3,653 (45.1%)
+    * NON_OPIOID_SUD            : 3,043 (37.6%)
+    * ANXIETY                   : 2,651 (32.7%)
+    * DEPRESSIVE_DISORDER       : 2,161 (26.7%)
+    * ALCOHOL_USE_DISORDER      : 1,081 (13.4%)
+    * OUD_MILD                  : 770 (9.5%)
+    * BIPOLAR_DISORDER          : 632 (7.8%)
+    * CUD_MODSEV                : 627 (7.7%)
+    * PTSD                      : 434 (5.4%)
+    * CUD_MILD                  : 315 (3.9%)
+    * HEPATITIS_C               : 252 (3.1%)
+    * SCHIZOPHRENIA             : 93 (1.1%)
+    * HIV_AIDS                  : 38 (0.5%)
+
+→ Diagnosis Processing Complete.
+
+================================================================================
+
+[STEP 3] Charlson Comorbidity Index (CCI).
+   - Window: 180 days prior to BUP Start.
+   - Methodology: 'MAX' recorded index over the lookback period.
+
+   --- CCI Distribution ---
+    * Mean (SD)    : 0.74 (+/- 1.36)
+    * Median (IQR) : 0.00 (0.00-1.00)
+    * Max Score    : 17.00
+    * Zero Score   : 5,094 patients (62.9%) have CCI=0
+
+→ CCI Merged.
+
+================================================================================
+
+[STEP 4] Medication History Flagging.
+   - Window: 180 days prior to BUP Start.
+   - Logic: Matches TCGPI codes (Medi-Span GPI) directly from Rx claims.
+
+   --- Medication Usage (Pre-Index) ---
+    * ANTIDEPRESSANTS           : 3,186 (39.4%)
+    * OPIOID_ANALGESICS         : 2,344 (29.0%)
+    * BENZODIAZEPINES           : 1,654 (20.4%)
+    * ANTIPSYCHOTICS            : 1,114 (13.8%)
+    * STIMULANTS                : 781 (9.6%)
+    * NONBENZODIAZEPINE         : 481 (5.9%)
+    * MOOD_STABILIZERS          : 187 (2.3%)
+
+→ Rx Flags Merged.
+
+================================================================================
+
+[STEP 5a] Healthcare Utilization Counts.
+   - Methodology: Count of UNIQUE service dates per setting (proxy for distinct visits).
+
+   → Visit Counts Merged (Method: Unique Dates).
+
+================================================================================
+================================================================================
+================================================================================
+
+## SELECTED_FEATURES
+
+Original feature count: 68
+Filtered feature count: 68
+Columns found in dataset: 68
+Columns missing from dataset: 0
+Filtered dataset saved to: bup_features.xlsx
+
